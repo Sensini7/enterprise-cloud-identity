@@ -1,0 +1,88 @@
+name: 'zReusable: Entra Compliance Tests - ScubaGear'
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: Environment to perform tests against
+
+permissions:
+      id-token: write
+      contents: read
+      checks: write
+
+env:
+    IS_AZURE_GOV: "${{ vars.IS_AZURE_GOV }}"
+    AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+    AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+    AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+
+jobs:
+  run-scubagear-tests:
+    environment: ${{ inputs.environment }}
+    name: Run ScubaGear Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Execute ScubaGear
+      shell: pwsh
+      run: |
+        if ($env:IS_AZURE_GOV -eq "true") {
+          az cloud set --name AzureUSGovernment
+        }
+        az login --service-principal -u $env:AZURE_CLIENT_ID -p $env:AZURE_CLIENT_SECRET --tenant $env:AZURE_TENANT_ID
+        $AccessToken = (az account get-access-token --resource-type ms-graph | ConvertFrom-Json).accessToken
+
+        if ($env:IS_AZURE_GOV -eq 'true') {
+          $GRAPH_ENVIRONMENT = 'USGov'
+          $ConfigFile = ".\ScubaGear\gov.config"
+        } else {
+          $GRAPH_ENVIRONMENT = 'Global'
+          $ConfigFile = ".\ScubaGear\com.config"
+        }
+        # $WarningPreference = "Continue" 
+        # $InformationPreference = "Continue" 
+        # $DebugPreference = "Continue" 
+
+        $SecureAccessToken = ConvertTo-SecureString -String $AccessToken -AsPlainText -Force
+        Connect-MgGraph -AccessToken $SecureAccessToken -NoWelcome -Environment $GRAPH_ENVIRONMENT
+
+        ## Execute ScubaGear
+        $env:SCUBAGEAR_SKIP_VERSION_CHECK = $true ## required for prerelease versions
+        Install-Module ScubaGear -RequiredVersion 1.5.0-rc2 -Force -AllowPrerelease
+        # Initialize-SCuBA
+
+        ## Install dependencies explicitly as the `Initalize-SCuBA` cmdlet is not performant
+        $GraphModules = @(
+          "Microsoft.Graph.Beta.Users",
+          "Microsoft.Graph.Beta.Groups",
+          "Microsoft.Graph.Beta.Identity.DirectoryManagement",
+          "Microsoft.Graph.Beta.Identity.SignIns",
+          "Microsoft.Graph.Beta.DirectoryObjects"
+        )
+
+        $GraphModules | ForEach-Object {
+          Install-Module -Name $_ -RequiredVersion 2.26.1 -Force
+        }
+        
+        Install-Module powershell-yaml -RequiredVersion 0.4.11 -Force
+
+        # Install-OPAforSCuBA
+
+        ## Install OPA manually as the setup-opa github action and `Initalize-SCuBA` cmdlet are not working as expected
+        curl -L -o opa https://github.com/open-policy-agent/opa/releases/download/v1.0.0/opa_linux_amd64
+        chmod 755 ./opa
+
+        $OnMicrosoftDomain = (Get-MgOrganization).VerifiedDomains | Where IsInitial | Select-Object -ExpandProperty Name 
+
+        Invoke-SCuBA -ConfigFilePath $ConfigFile -LogIn $false -Organization $OnMicrosoftDomain -DarkMode
+
+    - name: Archive ScubaGear Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: scubagear-test-results
+        path: M365BaselineConformance*

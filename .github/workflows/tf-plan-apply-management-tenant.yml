@@ -1,0 +1,59 @@
+name: "Terraform: Management Tenant Plan/Apply"
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+    branches:
+      - main
+    paths:
+      - '*.tf'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '*.tf'
+      - 'customers/*/*.tf'
+      - '.github/workflows/tf-plan-apply.yml'
+  workflow_dispatch:
+    inputs:
+      execute_change:
+        required: false
+        type: boolean
+        description: Execute Change
+        default: false
+      maintenance_mode:
+        required: false
+        type: boolean
+        default: false
+        description: Enable Maintenance Mode
+          
+#Special permissions required for OIDC authentication
+permissions:
+    id-token: write
+    contents: read
+    pull-requests: write
+    checks: write
+
+jobs:
+  alert-upon-prod-deployment:
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: sumvita-gov
+    secrets: inherit
+  call-plan-and-apply:
+    uses: ./.github/workflows/tf-plan-apply.yml
+    with:
+      environment: sumvita-gov
+      ## If the workflow_dispatch event is triggered and the execute_change input is set to true, then execute the change. 
+      ## Otherwise, evaluate if the branch is main and execute the change, or perform a plan-only.
+      execute_change: ${{ github.event_name == 'workflow_dispatch' && inputs.execute_change || (github.ref_name == 'main' && true || false) }}
+      maintenance_mode: '${{ inputs.maintenance_mode || false }}'
+      tfvars_folder: './tfvars/'
+    secrets: inherit
+  run-compliance-check:
+    needs: call-plan-and-apply
+    if: ${{ needs.call-plan-and-apply.outputs.apply_completed == 'true' }}
+    uses: ./.github/workflows/compliance-check.yml
+    with:
+      environment: sumvita-gov
+    secrets: inherit

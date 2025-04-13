@@ -1,0 +1,62 @@
+name: "Terraform: Resource Tenant Plan/Apply"
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+    branches:
+      - main
+    paths:
+      - 'customers\*\*.tf'
+  ## This suppression will be removed once branch-driven Workflows have been completed
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - sumvita-gov ## Government Management Tenant
+          - kalvico-gov ## Government Demo Tenant
+          - sumvita ## Commercial Management Tenant
+          - kalvico ## Commercial Demo Tenant
+      execute_change:
+        required: false
+        description: Execute Change
+        type: boolean
+        default: false
+      maintenance_mode:
+        required: false
+        type: boolean
+        default: false
+        description: Enable Maintenance Mode
+
+#Special permissions required for OIDC authentication
+permissions:
+    id-token: write
+    contents: read
+    pull-requests: write
+    checks: write
+
+jobs:
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+    secrets: inherit
+  call-plan-and-apply:
+    uses: ./.github/workflows/tf-plan-apply.yml
+    with:
+      environment: ${{ inputs.environment}}
+      execute_change: ${{ inputs.execute_change }}
+      maintenance_mode: '${{ inputs.maintenance_mode || false }}'
+      tfvars_folder: './tfvars/'
+    secrets: inherit
+  run-compliance-check:
+    needs: call-plan-and-apply
+    if: ${{ needs.call-plan-and-apply.outputs.apply_completed == 'true' }}
+    uses: ./.github/workflows/compliance-check.yml
+    with:
+      environment: ${{ inputs.environment}}
+    secrets: inherit

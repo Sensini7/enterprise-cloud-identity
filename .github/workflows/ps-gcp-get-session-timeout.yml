@@ -1,0 +1,80 @@
+name: "GCP: Get Session Timeout" 
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/ps-gcp-get-session-timeout.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - kalvico-gcp
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  GCP_SERVICE_ACCOUNT_CLIENT_ID: ${{ vars.GCP_SERVICE_ACCOUNT_CLIENT_ID }}
+  GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL: ${{ vars.GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL }}
+  GCP_SERVICE_ACCOUNT_EMAIL: ${{ vars.GCP_SERVICE_ACCOUNT_EMAIL }}
+  GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_BASE64: ${{ secrets.GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_BASE64 }}
+  GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_PASSWORD: ${{ secrets.GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_PASSWORD }}
+  
+  SESSION_CONTROLS: ${{ vars.SESSION_CONTROLS }}
+
+jobs: 
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: ${{ inputs.environment || 'kalvico-gcp' }}
+    secrets: inherit
+
+  gcp-get-session-controls:
+    environment: ${{ inputs.environment || 'kalvico-gcp' }}
+    runs-on: ubuntu-latest
+    steps:
+
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout common module
+      uses: actions/checkout@v4
+      with:
+        repository: 'EasyDynamics/eci-gcp-modules'
+        ref: '0.0.6'
+        path: 'EZD.ECI.GCP.Common'
+        sparse-checkout: 'EZD.ECI.GCP.Common'
+        ssh-key: ${{ secrets.GCP_MODULES_REPO_SSH_PRIVATE_KEY }}
+
+    - name: Checkout feature module
+      uses: actions/checkout@v4
+      with:
+        repository: 'EasyDynamics/eci-gcp-modules'
+        ref: '0.0.6'
+        path: 'EZD.ECI.GCP.SessionTimeout'
+        sparse-checkout: 'EZD.ECI.GCP.SessionTimeout'
+        ssh-key: ${{ secrets.GCP_MODULES_REPO_SSH_PRIVATE_KEY }}
+
+    - name: 'Get Session Timeout Policy'
+      shell: pwsh
+      run: |-
+        Import-Module .\EZD.ECI.GCP.Common\EZD.ECI.GCP.Common\EZD.ECI.GCP.Common.psd1 -Force
+        Import-Module .\EZD.ECI.GCP.SessionTimeout\EZD.ECI.GCP.SessionTimeout\EZD.ECI.GCP.SessionTimeout.psd1 -Force
+
+        $Scopes = @("https://www.googleapis.com/auth/cloud-identity.policies.readonly")
+
+        $AccessTokenSplat = @{
+          Issuer = $env:GCP_SERVICE_ACCOUNT_EMAIL
+          Subject = $env:GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL
+          P12CertificateBase64 = $env:GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_BASE64
+          P12CertificatePassword = $env:GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_PASSWORD
+          Scopes = $Scopes
+        }
+
+        $AccessToken = Get-EciGwsAccessToken @AccessTokenSplat
+        $DesiredSessionTimeout = $env:SESSION_CONTROLS
+
+        Get-SessionTimeout -DesiredSessionTimeout $DesiredSessionTimeout -AccessToken $AccessToken

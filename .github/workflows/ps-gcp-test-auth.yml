@@ -1,0 +1,33 @@
+name: "GCP: Testing Authentication" 
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/ps-gcp-test-auth.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - kalvico-gcp
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  GCP_SERVICE_ACCOUNT_CLIENT_ID: ${{ vars.GCP_SERVICE_ACCOUNT_CLIENT_ID }}
+  GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL: ${{ vars.GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL }}
+  GCP_SERVICE_ACCOUNT_EMAIL: ${{ vars.GCP_SERVICE_ACCOUNT_EMAIL }}
+  GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_BASE64: ${{ secrets.GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_BASE64 }}
+  GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_PASSWORD: ${{ secrets.GCP_SERVICE_ACCOUNT_CREDENTIALS_P12_PASSWORD }}
+
+jobs: 
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: ${{ inputs.environment || 'kalvico-gcp' }}
+    secrets: inherit

@@ -1,0 +1,100 @@
+name: "zReusable: Audit Production Deployment"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+#Special permissions required for OIDC authentication
+permissions:
+  contents: read
+
+#These environment variables are used by the terraform azure provider to setup OIDC auth.
+env:
+  ## Standard variables
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  IS_AZURE_GOV: "${{ vars.IS_AZURE_GOV }}"
+
+  ## Subscription variables
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+  ## Production Metrics reporting vars
+  WORKFLOW_NAME: ${{ github.workflow	}}
+  GITHUB_ENV_NAME: ${{ inputs.environment }}
+  CUSTOMER_NAME: ${{ vars.CUSTOMER_NAME}}
+  PROJECT_NAME: ${{ vars.PROJECT_NAME || 'icam'}}
+  ENVIRONMENT_NAME: ${{ vars.ENVIRONMENT_NAME || 'mgmt'}}
+
+jobs:
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    environment: ${{ inputs.environment }}
+    name: "Audit Production Deployment"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Authenticate and Write to Log Analytics
+        shell: pwsh
+        run: |
+          if ($env:IS_AZURE_GOV -eq "true") {
+              $ARM_ENVIRONMENT = 'AzureUSGovernment'
+              $TopLevelDomain = "us"
+          } else {
+              $ARM_ENVIRONMENT = 'AzureCloud'
+              $TopLevelDomain = "com"
+          }
+
+          $ErrorActionPreference = "Stop"
+          Install-Module -Name Az.Accounts,Az.OperationalInsights -Force
+          $SecureStringClientSecret = ConvertTo-SecureString $env:AZURE_CLIENT_SECRET -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential ($env:AZURE_CLIENT_ID, $SecureStringClientSecret)
+          $HideOutput = Connect-AzAccount -Environment $ARM_ENVIRONMENT -SubscriptionId $env:AZURE_SUBSCRIPTION_ID -TenantId $env:AZURE_TENANT_ID -Credential $Credential -ServicePrincipal
+
+          $NamingPrefix = "$($env:CUSTOMER_NAME)-$($env:PROJECT_NAME)-$($env:ENVIRONMENT_NAME)-monitoring"
+          $workspaceName = "$($NamingPrefix)-law"
+          $workspaceRgName = "$($NamingPrefix)-rg"
+          $workspaceObject = Get-AzOperationalInsightsWorkspace -Name $workspaceName -ResourceGroupName $workspaceRgName
+
+          $workspaceId = $workspaceObject.CustomerId
+          $primaryKey = (Get-AzOperationalInsightsWorkspaceSharedKey -ResourceGroupName $workspaceRgName -Name $workspaceName).PrimarySharedKey
+          $logType = "ProductionPipeline"
+          $timestamp = (Get-Date).ToUniversalTime().ToString("R")
+          $message = "A production pipeline, $env:WORKFLOW_NAME has been invoked against the $env:GITHUB_ENV_NAME environment."
+          $metricName = "ProductionDeploymentCount"
+          $metricValue = 1
+
+          $jsonPayload = @{
+            timestamp = $timestamp
+            message = $message
+            metrics = @(
+              @{
+                name = $metricName
+                value = $metricValue
+              }
+            )
+          } | ConvertTo-Json
+
+          $contentLength = $jsonPayload.Length
+          $stringToHash = "POST`n$contentLength`napplication/json`nx-ms-date:$timestamp`n/api/logs"
+          $hmacsha256 = New-Object System.Security.Cryptography.HMACSHA256
+          $hmacsha256.Key = [Convert]::FromBase64String($primaryKey)
+          $signatureBytes = $hmacsha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($stringToHash))
+          $signature = [Convert]::ToBase64String($signatureBytes)
+
+          $headers = @{
+            "Content-Type" = "application/json"
+            "Log-Type" = $logType
+            "x-ms-date" = $timestamp
+            "Authorization" = "SharedKey $($workspaceId):$($signature)"
+          }
+          $Uri = "https://$workspaceId.ods.opinsights.azure.$($TopLevelDomain)/api/logs?api-version=2016-04-01"
+          Write-Output $Uri
+          try {
+            $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $jsonPayload
+          } catch {
+            Write-Output "Error: $($_.Exception.Message)"
+            throw
+          }

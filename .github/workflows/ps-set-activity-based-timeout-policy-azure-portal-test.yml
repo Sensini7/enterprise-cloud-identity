@@ -1,0 +1,34 @@
+name: "TEST: Entra: Set Activity Based Timeout Policy (Azure Portal)" 
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - sumvita-gov
+          - sumvita
+          - kalvicoe
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  IS_AZURE_GOV: "${{ vars.IS_AZURE_GOV }}"
+  ExecuteChange: "${{ inputs.execute || 'false'}}"
+
+jobs: 
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit
+  

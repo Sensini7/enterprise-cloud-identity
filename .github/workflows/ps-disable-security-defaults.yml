@@ -1,0 +1,55 @@
+name: "Entra: Initialize Baseline"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - sumvita-gov
+          - kalvico-gov
+          - sumvita
+          - kalvico
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  IS_AZURE_GOV: "${{ vars.IS_AZURE_GOV }}"
+
+jobs:
+  run-powershell-script:
+    environment: ${{ inputs.environment }}
+    name: "Disable Entra Security Defaults (Required to enable Conditional Access Policies)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Disable Entra Security Defaults
+        shell: pwsh
+        run: |
+          if ($env:IS_AZURE_GOV -eq "true") {
+            az cloud set --name AzureUSGovernment
+            $GRAPH_ENVIRONMENT = 'USGov'
+          } else {
+            $GRAPH_ENVIRONMENT = 'Global'
+          }
+          az login --service-principal -u $env:AZURE_CLIENT_ID -p $env:AZURE_CLIENT_SECRET --tenant $env:AZURE_TENANT_ID
+          $AccessToken = (az account get-access-token --resource-type ms-graph | ConvertFrom-Json).accessToken
+          
+          $SecureAccessToken = ConvertTo-SecureString -String $AccessToken -AsPlainText -Force
+          Connect-MgGraph -AccessToken $SecureAccessToken -NoWelcome -Environment $GRAPH_ENVIRONMENT
+
+          $DefaultSecPolicyisEnabled = (Get-MgPolicyIdentitySecurityDefaultEnforcementPolicy).IsEnabled
+          if ($DefaultSecPolicyisEnabled) {
+              $params = @{ IsEnabled = $false }
+              Update-MgPolicyIdentitySecurityDefaultEnforcementPolicy -BodyParameter $params
+          } else {
+              Write-Host "Security Defaults are already disabled"
+          }

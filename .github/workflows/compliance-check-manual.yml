@@ -1,0 +1,38 @@
+name: 'Compliance: Manual CISA SCuBA tests'
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/compliance-check-manual.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to perform tests against
+        options:
+          - sumvita-gov
+          - sumvita
+          - kalvico
+          - kalvico-gov
+          - kalvico-gcp
+      filter-tags:
+        required: false
+        type: string
+        description: Comma separated list of PesterConfiguration Filter Tags to run, e.g. 'MS.AAD,MS.AAD.3.6,MS.AAD.3'
+        default: MS.AAD
+
+permissions:
+    id-token: write
+    contents: read
+    pull-requests: write
+    checks: write
+
+jobs:
+  run-compliance-check:
+    uses: ./.github/workflows/compliance-check.yml
+    with:
+      environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+      filter-tags: ${{ inputs.filter-tags || 'MS.AAD'}}
+    secrets: inherit

@@ -1,0 +1,24 @@
+name: 'Compliance: Nightly CISA SCuBA tests'
+
+on:
+    schedule:
+        - cron: '0 0 1 1 *' # Runs at 5 AM UTC (Midnight EST)
+
+#Special permissions required for OIDC authentication
+permissions:
+    id-token: write
+    contents: read
+    pull-requests: write
+    checks: write
+
+jobs:
+  run-compliance-check-management:
+    uses: ./.github/workflows/compliance-check.yml
+    with:
+      environment: sumvita
+    secrets: inherit
+  run-compliance-check-kalvico:
+    uses: ./.github/workflows/compliance-check.yml
+    with:
+      environment: kalvico
+    secrets: inherit

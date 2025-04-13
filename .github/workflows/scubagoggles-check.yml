@@ -1,0 +1,112 @@
+name: 'zReusable: GCP Compliance Tests - ScubaGoggles'
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: Environment to perform tests against
+
+permissions:
+      id-token: write
+      contents: read
+      checks: write
+
+jobs:
+  run-scubagoggles-tests:
+    environment: ${{ inputs.environment }}
+    name: Run ScubaGoggles Tests
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/checkout@v4
+      with:
+        repository: 'cisagov/ScubaGoggles'
+        ref: 'main'
+        path: 'ScubaGoggles'
+    
+    - id: 'auth'
+      name: 'Authenticate to GCP'
+      uses: 'google-github-actions/auth@v2'
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_CREDENTIALS_JSON }}
+        create_credentials_file: 'true'
+
+        # add access token scopes
+        access_token_scopes: |
+          https://www.googleapis.com/auth/cloud-platform
+          https://www.googleapis.com/auth/admin.directory.user.readonly
+          https://www.googleapis.com/auth/admin.directory.group.readonly
+          https://www.googleapis.com/auth/admin.directory.domain.readonly
+          https://www.googleapis.com/auth/admin.directory.orgunit.readonly
+          https://www.googleapis.com/auth/cloud-identity.policies.readonly
+          https://www.googleapis.com/auth/admin.directory.customer.readonly 
+          https://www.googleapis.com/auth/cloud-identity.policies.readonly
+
+    - name: 'Install and Execute ScubaGoggles Tests'
+      working-directory: 'ScubaGoggles'
+      shell: pwsh
+      env: 
+        CREDENTIALS_FILE_PATH: ${{ steps.auth.outputs.credentials_file_path }}
+        GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL: ${{ vars.GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL }}
+        
+      run: |-
+        ## Used to print the results of the ScubaGoggles tests to the step summary
+        Install-Module FormatMarkdownTable -Force
+
+        # Create venv
+        python -m venv .venv
+        & .venv\Scripts\Activate.ps1
+
+        # Install ScubaGoggles
+        $(pip install -r requirements.txt) | Out-Null
+
+        # Setup ScubaGoggles
+        Write-Output "$($pwd.Path)\GWSBaselineConformance
+        yes
+        $($pwd.Path)\GWSBaselineConformance
+        $env:CREDENTIALS_FILE_PATH
+        " | python scuba.py setup
+        
+        # Run ScubaGoggles
+        python scuba.py gws `
+            -b commoncontrols `
+            --subjectemail $env:GCP_SERVICE_ACCOUNT_SUBJECT_EMAIL
+
+        $json = (gc -raw .\GWSBaselineConformance\GWSBaselineConformance*\ScubaResults.json) | ConvertFrom-Json
+        $commonControlsMd = $json.Summary.commoncontrols | Format-MarkdownTableTableStyle -DoNotCopyToClipboard -HideStandardOutput -ShowMarkdown
+        $rulesControlsMd = $json.Summary.rules | Format-MarkdownTableTableStyle -DoNotCopyToClipboard -HideStandardOutput -ShowMarkdown
+
+        function Add-EmojiToMdTable {
+          param(
+            [string]$MdTable
+          )
+
+          $MdTable = $MdTable -replace "Passes",":heavy_check_mark:Passes"
+          $MdTable = $MdTable -replace "Errors",":warning:Errors"
+          $MdTable = $MdTable -replace "Failures",":x:Failures"
+          $MdTable = $MdTable -replace "Warnings",":warning:Warnings"
+          $MdTable = $MdTable -replace "Manual",":writing_hand:Manual"
+          $MdTable = $MdTable -replace "Omit",":next_track_button:Omit"
+
+          return $MdTable
+        }
+
+        $commonControlsMd = Add-EmojiToMdTable -MdTable $commonControlsMd
+        $rulesControlsMd = Add-EmojiToMdTable -MdTable $rulesControlsMd
+
+        ## Add results to step summary
+        Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## ScubaGoggles Results`r`n`r`nSee artifact for full details"
+        Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Common Summary results:"
+        Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "$commonControlsMd"
+        Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Rule Summary results:"
+        Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "$rulesControlsMd"
+
+    - name: Archive GWS Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: GWSBaselineConformance
+        path: ScubaGoggles\GWSBaselineConformance\GWSBaselineConformance*\*

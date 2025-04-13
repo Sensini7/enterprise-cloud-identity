@@ -1,0 +1,91 @@
+name: "Entra: Set Sign-in Text"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/ps-set-sign-in-text.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - sumvita-gov
+          - kalvico-gov
+          - sumvita
+          - kalvico
+      execute:
+        required: true
+        type: boolean
+        description: Execute change
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  IS_AZURE_GOV: "${{ vars.IS_AZURE_GOV }}"
+  ExecuteChange: "${{ inputs.execute || 'false'}}"
+  SIGN_IN_TEXT: "${{ vars.SIGN_IN_TEXT }}"
+
+  
+
+jobs: 
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+    secrets: inherit
+
+  run-powershell-drift-detection:
+    environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+    name: "Sign-in Text Configuration"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout feature module
+        uses: actions/checkout@v4
+        with:
+          repository: 'EasyDynamics/EntraID-800-53-Terraform-Modules'
+          ref: '0.0.112'
+          path: 'EZD.ECI.SignInText'
+          sparse-checkout: 'powershell-modules/EZD.ECI.SignInText'
+          ssh-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+      - name: Checkout common module
+        uses: actions/checkout@v4
+        with:
+          repository: 'EasyDynamics/EntraID-800-53-Terraform-Modules'
+          ref: '0.0.115'
+          path: 'EZD.ECI.Common'
+          sparse-checkout: 'powershell-modules/EZD.ECI.Common'
+          ssh-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+      - name: Configure Entra ID Sign-in Text
+        shell: pwsh
+        run: |
+
+          # Install and import modules
+          Import-Module .\EZD.ECI.Common\powershell-modules\EZD.ECI.Common\EZD.ECI.Common.psd1 -Force
+
+          #connect to MgGraph
+          Connect-EciGraph
+
+          Import-Module .\EZD.ECI.SignInText\powershell-modules\EZD.ECI.SignInText\EZD.ECI.SignInText.psd1 -Force
+          
+          #declare variables 
+          $ExecuteChange = [System.Convert]::ToBoolean($env:ExecuteChange)
+          $DesiredSignInText = $env:SIGN_IN_TEXT
+          $TenantId = $env:AZURE_TENANT_ID
+
+
+          # Execute the change
+          Set-SignInText -TenantId $TenantId -DesiredSignInText $DesiredSignInText -ExecuteChange:$ExecuteChange

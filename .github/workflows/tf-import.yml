@@ -1,0 +1,87 @@
+name: "Terraform: State Import"
+
+on:
+  ## This suppression will be removed once branch-driven Workflows have been completed1
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - sumvita-gov
+          - sumvita
+          - kalvico
+          # - kalvico-gcc 
+      resource_address:
+        required: true
+        type: string
+        description: Terraform Resource Address to have the cloud_resource_identifier imported into
+      cloud_resource_identifier:
+        required: true
+        type: string
+        description: Cloud resource identifier (Resource ID in Azure, ARN in AWS, etc.) to import into the resource_address
+
+#Special permissions required for OIDC authentication
+permissions:
+    id-token: write
+    contents: read
+    
+env:
+    ARM_USE_OIDC: true
+    ARM_USE_AZUREAD: true
+    ARM_TENANT_ID: "${{ vars.TFSTATE_TENANT_ID }}"
+    ARM_CLIENT_ID: "${{ vars.TFSTATE_AZURE_CLIENT_ID }}"
+    ARM_SUBSCRIPTION_ID: ${{ vars.TFSTATE_AZURE_SUBSCRIPTION_ID}}
+    TF_VAR_resource-tenant-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+    TF_VAR_resource-tenant-client-id: ${{ vars.TFSTATE_AZURE_CLIENT_ID }}
+    TF_VAR_management-tenant-tenant-id: ${{ vars.TFSTATE_TENANT_ID }}
+    TF_VAR_management-tenant-client-id: ${{ vars.TFSTATE_AZURE_CLIENT_ID }}
+
+jobs:
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+    secrets: inherit
+
+  terraform-import:
+    ## Only GitHub users in the ALLOWED_MANUAL_DEPLOYERS list can trigger this workflow
+    if: contains(vars.ALLOWED_MANUAL_DEPLOYERS, github.actor)
+    environment: ${{ inputs.environment }}
+    name: "Terraform State Import"
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        tenant-id: ${{ vars.AZURE_TENANT_ID }}
+        client-id: ${{ vars.TFSTATE_AZURE_CLIENT_ID }}
+        allow-no-subscriptions: true
+
+    - name: Checkout
+      uses: actions/checkout@v4
+          
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+
+    - name: Add ssh key to ssh-agent
+      uses: webfactory/ssh-agent@v0.7.0
+      with:
+        ssh-private-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+    - name: Terraform Init
+      working-directory: ${{ startsWith(inputs.environment, 'sumvita') && '.' || format('customers/{0}', inputs.environment) }}
+      run: |
+        terraform init  --backend-config='storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT_NAME }}' \
+                        --backend-config='key=${{ vars.TFSTATE_KEY }}' \
+                        --backend-config='environment=${{ vars.TF_BACKEND_CONFIG_ENVIRONMENT }}'
+
+    - name: Terraform Import
+      working-directory: ${{ startsWith(inputs.environment, 'sumvita') && '.' || format('customers/{0}', inputs.environment) }}
+      run: |
+        echo "yes" | terraform import ${{ inputs.resource_address }} ${{ inputs.cloud_resource_identifier }}

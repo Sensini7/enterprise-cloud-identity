@@ -1,0 +1,242 @@
+name: 'Terraform: Drift Detection'
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/tf-drift.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - sumvita-gov
+          - kalvico-gov
+          - sumvita 
+          - kalvico
+      tfvars_folder:
+        required: false
+        type: string
+        default: "./tfvars/"
+  schedule:
+    - cron: '41 6 * * *' # runs nightly at 3:41 am EST
+
+#Special permissions required for OIDC authentication
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+
+#These environment variables are used by the terraform azure provider to setup OIDD authenticate.
+env:
+  ARM_USE_AZUREAD: true
+  ARM_ENVIRONMENT: ${{ vars.TF_BACKEND_CONFIG_ENVIRONMENT }}
+
+  TF_VAR_ci_environment_name: ${{ inputs.environment }}
+  MANAGEMENT_TENANT_TENANT_ID: ${{ vars.IS_AZURE_GOV == 'true' && vars.US_MANAGEMENT_TENANT_ID || vars.COMMERCIAL_MANAGEMENT_TENANT_ID}}
+  
+  AWS_REGION: ${{ vars.TFSTATE_REGION }}
+  AWS_ROLE_ARN: ${{ vars.TFSTATE_ROLE_ARN }}
+
+  ## tfvars file path vars 
+  TFVARS_FOLDER: "${{ inputs.tfvars_folder || './tfvars/' }}"
+  TFVARS_TENANT_FILE: "${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}.tfvars"  
+  TFVARS_COMMON_FILE: "common.tfvars"  
+
+jobs:
+  terraform-plan:
+    environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+    name: 'Terraform Plan'
+    runs-on: ubuntu-latest
+    env:
+      #this is needed since we are running terraform with read-only permissions
+      ARM_RESOURCE_PROVIDER_REGISTRATIONS : none
+      
+    outputs:
+      tfplanExitCode: ${{ steps.tf-plan.outputs.exitcode }}
+
+    steps:
+    - name: Setup AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.TFSTATE_ROLE_ARN }}
+        aws-region: ${{ vars.TFSTATE_REGION }}
+
+    - name: Authenticate and set Graph Access Token
+      shell: pwsh
+      run: |
+        
+        if ("${{ vars.IS_AZURE_GOV }}" -eq "true") {
+          az cloud set --name AzureUSGovernment
+        }
+        az login --service-principal -u ${{ vars.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ env.MANAGEMENT_TENANT_TENANT_ID }}
+        $AccessToken = (az account get-access-token --resource-type ms-graph | ConvertFrom-Json).accessToken
+        Write-Output "TF_VAR_graph_access_token=$AccessToken" | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+
+
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # Install the latest version of the Terraform CLI
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+
+    - name: Add ssh key to ssh-agent
+      # Supports fetching the packages. Not just the package.json git refs of legacy, but onerail scripts pulling packages.
+      uses: webfactory/ssh-agent@v0.7.0
+      with:
+        ssh-private-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform Init
+      run: |
+        terraform init --backend-config='bucket=${{ vars.TFSTATE_S3_BUCKET }}' \
+                        --backend-config='key=${{ vars.TFSTATE_KEY }}' \
+                        --backend-config='dynamodb_table=${{ vars.TFSTATE_DYNAMODB_TABLE }}' \
+                        --backend-config='encrypt=true'
+
+    # Generates an execution plan for Terraform
+    # An exit code of 0 indicated no changes, 1 a terraform failure, 2 there are pending changes.
+    - name: Terraform Plan
+      id: tf-plan
+      run: |
+        export exitcode=0
+
+        terraform plan -detailed-exitcode -no-color -out tfplan -var-file="$TFVARS_FOLDER$TFVARS_TENANT_FILE" -var-file="$TFVARS_FOLDER$TFVARS_COMMON_FILE" -lock-timeout=2m || export exitcode=$?
+        
+
+        echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+
+        if [ $exitcode -eq 1 ]; then
+          echo Terraform Plan Failed!
+          exit 1
+        else
+          exit 0
+        fi
+
+    # Save plan to artifacts
+    - name: Publish Terraform Plan
+      uses: actions/upload-artifact@v4
+      with:
+        name: tfplan
+        path: tfplan
+
+    # Create string output of Terraform Plan
+    - name: Create String Output
+      id: tf-plan-string
+      env:
+        ENV_NAME: ${{ inputs.environment || 'sumvita' }}
+      run: |
+        TERRAFORM_PLAN=$(terraform show -no-color tfplan)
+        WORKFLOW_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+        delimiter="$(openssl rand -hex 8)"
+        echo "summary<<${delimiter}" >> $GITHUB_OUTPUT
+        echo "## Workflow URL" >> $GITHUB_OUTPUT
+        echo "$WORKFLOW_URL" >> $GITHUB_OUTPUT
+        echo "## Environment Name" >> $GITHUB_OUTPUT
+        echo "$ENV_NAME" >> $GITHUB_OUTPUT
+        echo "## Terraform Plan Output" >> $GITHUB_OUTPUT
+        echo "<details><summary>Click to expand</summary>" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo '```terraform' >> $GITHUB_OUTPUT
+        echo "$TERRAFORM_PLAN" >> $GITHUB_OUTPUT
+        echo '```' >> $GITHUB_OUTPUT
+        echo "</details>" >> $GITHUB_OUTPUT
+        echo "${delimiter}" >> $GITHUB_OUTPUT
+
+    # Publish Terraform Plan as task summary
+    - name: Publish Terraform Plan to Task Summary
+      env:
+        SUMMARY: ${{ steps.tf-plan-string.outputs.summary }}
+      run: |
+        echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+
+    # If changes are detected, create a new issue
+    - name: Publish Drift Report
+      if: steps.tf-plan.outputs.exitcode == 2
+      uses: actions/github-script@v7
+      env:
+        SUMMARY: "${{ steps.tf-plan-string.outputs.summary }}"
+      with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = `${process.env.SUMMARY}`;
+            const title = 'Terraform Configuration Drift Detected';
+            const creator = 'github-actions[bot]'
+
+            // Look to see if there is an existing drift issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              creator: creator,
+              title: title
+            })
+
+            if( issues.data.length > 0 ) {
+              // We assume there shouldn't be more than 1 open issue, since we update any issue we find
+              const issue = issues.data[0]
+
+              if ( issue.body == body ) {
+                core.warning('Drift Detected: Found matching issue with duplicate content')
+              } else {
+                core.warning('Drift Detected: Found matching issue, updating body')
+                github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: body
+                })
+              }
+            } else {
+              core.warning('Drift Detected: Creating new issue')
+
+              github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body
+             })
+            }
+
+    # If changes aren't detected, close any open drift issues
+    - name: Publish Drift Report
+      if: steps.tf-plan.outputs.exitcode == 0
+      uses: actions/github-script@v7
+      with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const title = 'Terraform Configuration Drift Detected';
+            const creator = 'github-actions[bot]'
+
+            // Look to see if there is an existing drift issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              creator: creator,
+              title: title
+            })
+
+            if( issues.data.length > 0 ) {
+              const issue = issues.data[0]
+
+              github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              })
+            }
+
+    # Mark the workflow as failed if drift detected
+    - name: Error on Failure
+      if: steps.tf-plan.outputs.exitcode == 1
+      run: exit 1

@@ -1,0 +1,38 @@
+name: 'zReusable: Compliance Tests - Maester'
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: Environment to perform tests against
+      filter-tags:
+        required: false
+        type: string
+        description: Comma separated list of PesterConfiguration Filter Tags to run, e.g. 'MS.AAD,MS.AAD.3.6,MS.AAD.3'
+        default: MS.AAD
+      use-scubagear:
+        required: false
+        type: boolean
+        description: Use CISA ScubaGear instead of Maester
+        default: false
+
+permissions:
+      id-token: write
+      contents: read
+      checks: write
+
+jobs:
+  run-scubagoggles-tests:
+    if: inputs.environment == 'kalvico-gcp'
+    uses: ./.github/workflows/scubagoggles-check.yml
+    with:
+      environment: kalvico-gcp
+    secrets: inherit
+  run-scubagear-tests:
+    if: inputs.environment != 'kalvico-gcp'
+    uses: ./.github/workflows/scubagear-check.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit

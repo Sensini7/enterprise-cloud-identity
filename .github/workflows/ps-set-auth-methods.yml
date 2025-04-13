@@ -1,0 +1,551 @@
+name: "Entra: Set Authentication Method Policies"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/ps-set-auth-methods.yml'
+  ## This suppression will be removed once branch-driven Workflows have been completed
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to deploy to
+        options:
+          - sumvita-gov
+          - kalvico-gov
+          - sumvita
+          - kalvico
+      execute:
+        required: true
+        type: boolean
+        description: Execute change
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  ## Auth methods variables
+  AUTH_METHODS_ENABLED: ${{ vars.AUTH_METHODS_ENABLED }}
+  AUTH_METHODS_DISABLED: ${{ vars.AUTH_METHODS_DISABLED }}
+  EMAIL_INCLUDE_TARGETS: ${{ vars.EMAIL_INCLUDE_TARGETS }}
+  FIDO2_INCLUDE_TARGETS: ${{ vars.FIDO2_INCLUDE_TARGETS }}
+  FIDO2_AUTH_SETTINGS: ${{ vars.FIDO2_AUTH_SETTINGS }}
+  MSFTAUTH_INCLUDE_TARGETS: ${{ vars.MSFTAUTH_INCLUDE_TARGETS }}
+  SMS_INCLUDE_TARGETS: ${{ vars.SMS_INCLUDE_TARGETS }}
+  SOFTOATH_INCLUDE_TARGETS: ${{ vars.SOFTOATH_INCLUDE_TARGETS }}
+  TAP_INCLUDE_TARGETS: ${{ vars.TAP_INCLUDE_TARGETS }}
+  VOICE_INCLUDE_TARGETS: ${{ vars.VOICE_INCLUDE_TARGETS }}
+  CBA_INCLUDE_TARGETS: ${{ vars.CBA_INCLUDE_TARGETS }}
+  CBA_AUTH_MODE_CONFIG_GOV: ${{ vars.CBA_AUTH_MODE_CONFIG }}
+  CBA_AUTH_MODE_CONFIG_COM: ${{ vars.CBA_AUTH_MODE_CONFIG }}
+  CBA_USER_BINDINGS: ${{ vars.CBA_USER_BINDINGS }}
+  ICAM_KEY_VAULT_NAME: ${{ vars.ICAM_KEY_VAULT_NAME }}
+  AUTH_POLICY_MIGRATION_STATE: ${{vars.AUTH_POLICY_MIGRATION_STATE}}
+
+  TAP_AUTH_DEFAULT_LIFETIME_IN_MINUTES: ${{ vars.TAP_AUTH_DEFAULT_LIFETIME_IN_MINUTES }}
+  TAP_AUTH_DEFAULT_LENGTH: ${{ vars.TAP_AUTH_DEFAULT_LENGTH }}
+  TAP_AUTH_MIN_LIFETIME_IN_MINS: ${{ vars.TAP_AUTH_MIN_LIFETIME_IN_MINS }}
+  TAP_AUTH_MAX_LIFETIME_IN_MINS: ${{ vars.TAP_AUTH_MAX_LIFETIME_IN_MINS}}
+  TAP_AUTH_IS_USABLE: ${{ vars.TAP_AUTH_IS_USABLE}}
+  
+  ## Standard variables
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  IS_AZURE_GOV: "${{ vars.IS_AZURE_GOV }}"
+  ExecuteChange: "${{ inputs.execute || 'false'}}"
+  
+  ## Subscription variables
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  alert-upon-prod-deployment:
+    if: ${{ inputs.environment == 'PROD' }}
+    uses: ./.github/workflows/prod-deployment-alerts.yml
+    with:
+      environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+    secrets: inherit
+
+  
+  run-powershell-script:
+    environment: ${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}
+    name: "Implement Authentication Methods"
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout feature module
+        uses: actions/checkout@v4
+        with:
+          repository: 'EasyDynamics/EntraID-800-53-Terraform-Modules'
+          ref: '0.0.118'
+          path: 'EZD.ECI.AuthMethodPolicies'
+          sparse-checkout: 'powershell-modules/EZD.ECI.AuthMethodPolicies'
+          ssh-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+      - name: Checkout common module
+        uses: actions/checkout@v4
+        with:
+          repository: 'EasyDynamics/EntraID-800-53-Terraform-Modules'
+          ref: '0.0.117'
+          path: 'EZD.ECI.Common'
+          sparse-checkout: 'powershell-modules/EZD.ECI.Common'
+          ssh-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+      - name: Configure Authentication Method Policies
+        shell: pwsh
+        run: |
+          Install-Module Az.Accounts,Az.KeyVault -Force
+          Import-Module .\EZD.ECI.Common\powershell-modules\EZD.ECI.Common\EZD.ECI.Common.psd1 -Force
+          Import-Module Az.Accounts
+
+          Connect-EciGraph -ConnectSubscription
+
+          Import-Module .\EZD.ECI.AuthMethodPolicies\powershell-modules\EZD.ECI.AuthMethodPolicies\EZD.ECI.AuthMethodPolicies.psd1 -Force
+
+          # Store the Execute Change parameter in a variable
+          $ExecuteChange = [System.Convert]::ToBoolean($env:ExecuteChange)
+
+          # Indicate whether this is a drift detection run or a deployment run
+          if (-Not ($ExecuteChange)) {
+            Write-Host "Current: Drift Detection Run"
+          } else {
+            Write-Host "Current: Deployment Run"
+          }
+
+          # Initiate Exit variables
+          $ExitCodes = @()
+          $ExitLogs = @()
+
+          # Configure Entra ID certificate authorities
+          $icamKeyVault = $env:ICAM_KEY_VAULT_NAME
+          $tenantId = $env:AZURE_TENANT_ID
+          $Results = Update-EntraCertificateAuthorities -IcamKeyVault $icamKeyVault -TenantId $tenantId -ExecuteChange:$ExecuteChange
+          $ExitCode = $Results["ExitCode"]
+          $ExitLog = $Results["ExitLogs"]
+          $ExitCodes += $ExitCode
+          if($ExitCode -eq 2)
+          {
+            $ExitLogs += Write-Output "Entra Certificate Authority Drift:"
+            $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+          }
+
+          # Specify the authentication methods which should be enabled vs. disabled
+          $EnabledMethods = ($env:AUTH_METHODS_ENABLED).Split(",")
+          $DisabledMethods = ($env:AUTH_METHODS_DISABLED).Split(",")
+
+          ## NOTE:
+          ## The following empty string checking necessary in case the parameter in the repository is undefined, to prevent the workflow from breaking with an exit error
+
+          # Specify configurations for Email Authentication
+          if ("$env:EMAIL_INCLUDE_TARGETS" -eq "") {
+            $EmailIncludeTargets = $null
+          } else {
+            [hashtable[]] $EmailIncludeTargets = ConvertTo-HashTable (($env:EMAIL_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10))
+          }
+
+          $EmailVariableList = @("EnabledMethods","DisabledMethods","EmailIncludeTargets", "ExecuteChange")
+
+          # Specify configurations for FIDO2 Authentication
+          if ("$env:FIDO2_INCLUDE_TARGETS" -eq "") {
+            $Fido2IncludeTargets = $null
+          } else {
+            [hashtable[]] $Fido2IncludeTargets = ConvertTo-HashTable ($env:FIDO2_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10)
+          }
+
+          if ("$env:FIDO2_AUTH_SETTINGS" -eq "") {
+            $Fido2AuthSettings = $null
+          } else {
+            [hashtable[]] $Fido2AuthSettings = ConvertTo-HashTable ($env:FIDO2_AUTH_SETTINGS | ConvertFrom-Json -Depth 10)
+          }
+
+          $Fido2VariableList = @("EnabledMethods","DisabledMethods","Fido2IncludeTargets", "Fido2AuthSettings", "ExecuteChange")
+
+          # Specify configurations for Microsoft Authenticator Authentication
+          if ("$env:MSFTAUTH_INCLUDE_TARGETS" -eq "") {
+            $MicrosoftAuthenticatorIncludeTargets = $null
+          } else {
+            [hashtable[]] $MicrosoftAuthenticatorIncludeTargets = ConvertTo-HashTable ($env:MSFTAUTH_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10)
+          }
+
+          $MicrosoftAuthenticatorVariableList = @("EnabledMethods","DisabledMethods","MicrosoftAuthenticatorIncludeTargets", "ExecuteChange")
+
+          # Specify configurations for SMS Authentication
+          if ("$env:SMS_INCLUDE_TARGETS" -eq "") {
+            $SmsIncludeTargets = $null
+          } else {
+            [hashtable[]] $SmsIncludeTargets = ConvertTo-HashTable ($env:SMS_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10)
+          }
+
+          $SmsVariableList = @("EnabledMethods","DisabledMethods","SmsIncludeTargets", "ExecuteChange")
+
+          # Specify configurations for Software Oath Authentication
+          if ("$env:SOFTOATH_INCLUDE_TARGETS" -eq "") {
+            $SoftwareOathIncludeTargets = $null
+          } else {
+            [hashtable[]] $SoftwareOathIncludeTargets = ConvertTo-HashTable ($env:SOFTOATH_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10)
+          }
+
+          $SoftwareOathVariableList = @("EnabledMethods","DisabledMethods","SoftwareOathIncludeTargets", "ExecuteChange")
+
+          # Specify configurations for Temporary Access Pass Authentication
+          if ("$env:TAP_INCLUDE_TARGETS" -eq "") {
+            $TemporaryAccessPassIncludeTargets = $null
+          } else {
+            [hashtable[]] $TemporaryAccessPassIncludeTargets = ConvertTo-HashTable ($env:TAP_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10)
+          }
+
+          $TemporaryAccessPassAuthSettings = @{
+              "defaultLifetimeInMinutes" = $env:TAP_AUTH_DEFAULT_LIFETIME_IN_MINUTES
+              "defaultLength" = $env:TAP_AUTH_DEFAULT_LENGTH
+              "minimumLifetimeInMinutes" = $env:TAP_AUTH_MIN_LIFETIME_IN_MINS
+              "maximumLifetimeInMinutes" = $env:TAP_AUTH_MAX_LIFETIME_IN_MINS
+              "isUsableOnce" = [System.Convert]::ToBoolean($env:TAP_AUTH_IS_USABLE)
+          }
+          $TemporaryAccessPassVariableList = @("EnabledMethods","DisabledMethods","TemporaryAccessPassIncludeTargets", "TemporaryAccessPassAuthSettings", "ExecuteChange")
+
+          # Specify configurations for Voice Authentication
+          if ("$env:VOICE_INCLUDE_TARGETS" -eq "") {
+            $VoiceIncludeTargets = $null
+          } else {
+            [hashtable[]] $VoiceIncludeTargets = ConvertTo-HashTable ($env:VOICE_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10)
+          }
+
+          $VoiceVariableList = @("EnabledMethods","DisabledMethods","VoiceIncludeTargets", "ExecuteChange")
+
+          # Specify configurations for X509 Certificate Authentication
+          if ("$env:CBA_INCLUDE_TARGETS" -eq "") {
+            $X509CertificateIncludeTargets = $null
+          } else {
+            [hashtable[]] $X509CertificateIncludeTargets = ConvertTo-HashTable ($env:CBA_INCLUDE_TARGETS | ConvertFrom-Json -Depth 10)
+          }
+
+          if ($env:IS_AZURE_GOV -eq "true") {
+            if ("$env:CBA_AUTH_MODE_CONFIG_GOV" -eq "") {
+              $authenticationModeConfiguration = $null
+            } else {
+              ## Since the rules property is an array of objects, we need to convert the rules property to a hashtable array
+              $JsonAuthModeConfig = ($env:CBA_AUTH_MODE_CONFIG_GOV | ConvertFrom-Json -Depth 10)
+              $RulesList = @()
+              ForEach ($rule in $JsonAuthModeConfig.rules) {
+                $RulesList += ConvertTo-HashTable $rule
+              }
+              $authenticationModeConfiguration = ConvertTo-HashTable ($env:CBA_AUTH_MODE_CONFIG_GOV | ConvertFrom-Json -Depth 10)
+              $authenticationModeConfiguration.rules = $RulesList
+            }
+          } else {
+            if ("$env:CBA_AUTH_MODE_CONFIG_COM" -eq "") {
+              $authenticationModeConfiguration = $null
+            } else {
+              ## Since the rules property is an array of objects, we need to convert the rules property to a hashtable array
+              $JsonAuthModeConfig = ($env:CBA_AUTH_MODE_CONFIG_COM | ConvertFrom-Json -Depth 10)
+              $RulesList = @()
+              ForEach ($rule in $JsonAuthModeConfig.rules) {
+                $RulesList += ConvertTo-HashTable $rule
+              }
+              $authenticationModeConfiguration = ConvertTo-HashTable ($env:CBA_AUTH_MODE_CONFIG_COM | ConvertFrom-Json -Depth 10)
+              $authenticationModeConfiguration.rules = $RulesList
+            }
+          }
+
+          if ("$env:CBA_USER_BINDINGS" -eq "") {
+            $certificateUserBindings = $null
+          } else {
+            [hashtable[]] $certificateUserBindings = ConvertTo-HashTable ($env:CBA_USER_BINDINGS | ConvertFrom-Json -Depth 10)
+          }
+
+          $X509CertificateVariableList = @("EnabledMethods","DisabledMethods","X509CertificateIncludeTargets","authenticationModeConfiguration","certificateUserBindings", "ExecuteChange")
+
+          ### Set Authentication Methods ###
+          # Set email authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "Email"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $EmailVariableList
+            $Results = Update-EmailAuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set FIDO2 authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "Fido2"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $Fido2VariableList
+            $Results = Update-Fido2AuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set Microsoft Authenticator authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "MicrosoftAuthenticator"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $MicrosoftAuthenticatorVariableList
+            $Results = Update-MicrosoftAuthenticatorAuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set SMS authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "Sms"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $SmsVariableList
+            $Results = Update-SmsAuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set Software Oath authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "SoftwareOath"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $SoftwareOathVariableList
+            $Results = Update-SoftwareOathAuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitCodes += $ExitCode
+            $ExitLog = $Results["ExitLogs"]
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set Temporary Access Pass authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "TemporaryAccessPass"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $TemporaryAccessPassVariableList
+            $Results = Update-TemporaryAccessPassAuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set voice authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "Voice"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $VoiceVariableList
+            $Results = Update-VoiceAuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set X509 certificate authentication method
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            $PreviousMethod = $CurrentMethod
+            $CurrentMethod = "X509Certificate"
+            if(!$PreviousMethod)
+            {
+              Write-Host "Entra ID Certificate Authority processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            else
+            {
+              Write-Host "$PreviousMethod method processing is complete. Now initiating $CurrentMethod method policy processing."
+            }
+            $ParameterList = New-ParameterList -VariableList $X509CertificateVariableList
+            $Results = Update-X509CertificateAuthMethod @ParameterList
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "$CurrentMethod Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+            return $Results
+          }
+
+          # Set Auth Method migration state
+          if($ExitCode -eq 0 -or $ExitCode -eq 2 -or $ExitCode -eq 3)
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Entra ID Authentication methods are set as expected. Now setting the Entra ID Authentication Method migration state."
+            $Results = Update-AuthMethodMigrationState -PolicyMigrationState $env:AUTH_POLICY_MIGRATION_STATE -ExecuteChange:$ExecuteChange
+            $ExitCode = $Results["ExitCode"]
+            $ExitLog = $Results["ExitLogs"]
+            $ExitCodes += $ExitCode
+            if($ExitCode -eq 2)
+            {
+              $ExitLogs += Write-Output "Authentication Method Migration State Drift:"
+              $ExitLog | foreach { $ExitLogs += Write-Output `t$_ }
+            }
+          }
+          else
+          {
+            Write-Host "===================================================================================================="
+            Write-Host "Execution of prior function failed. Halting authentication method configuration."
+          }
+          
+          # Export Logs
+          if($ExitCodes -Contains 2)
+          {
+            $ReturnValue = @{ "ExitCode" = 2; "ExitLogs" = $ExitLogs }
+            return $ReturnValue
+          }
+          else
+          {
+            Write-Host "No drift detected on any scanned settings."
+          }
