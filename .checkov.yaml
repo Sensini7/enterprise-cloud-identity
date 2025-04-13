@@ -1,0 +1,30 @@
+---
+block-list-secret-scan: [".secrets.baseline"]
+branch: main
+directory:
+  - .
+download-external-modules: true
+evaluate-variables: true
+external-modules-download-path: .external_modules
+framework:
+  - arm
+  - bicep
+  - github_actions
+  - json
+  - yaml
+  - secrets
+  - terraform
+mask: []
+secrets-history-timeout: 12h
+summary-position: top
+var-file:
+  - tfvars/kalvico.tfvars
+  - tfvars/kalvico-gov.tfvars
+  - tfvars/sumvita.tfvars
+  - tfvars/sumvita-gov.tfvars
+skip-check:
+  - CKV_TF_3 ## State files are locked, this is done during cli, so this check is not applicable
+  - CKV_TF_1 ## Tags are made to be immutable via the Repository settings, so this check is not applicable
+  - CKV_TF_2 ## Our tags don't start with a `v` so this check is not applicable.
+  - CKV_GHA_7 ## We must have manual deployments, so this check is not applicable
+  
