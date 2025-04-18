@@ -10,5 +10,5 @@ is_azure_gov                        = false
 primary_region                      = "eastus"
 customer_name                       = "EZD"
 #allowed_ip_cidr_list                = ["68.252.244.132", "108.48.5.37"]
-#deployment_enterprise_app_object_id = "16b48dd7-a8ac-4c1f-a45c-22a4638dd84e"
+deployment_enterprise_app_object_id = "4f48fad6-3647-4258-b300-f8b158567fc2"
 environment_name = "mgmt"
