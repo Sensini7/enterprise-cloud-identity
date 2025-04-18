@@ -25,6 +25,8 @@ module "conditional_access_policy" {
 
   block_graph_access = "enabledForReportingButNotEnforced"
   # mg_graph_app_role_assignment_required = false
+  managed_device_mfa_authentication = "enabledForReportingButNotEnforced"
+  managed_device_mfa_registration = "enabledForReportingButNotEnforced"
 
   block_cloud_admin_portal_access = "enabledForReportingButNotEnforced"
   block_cloud_api_access          = "enabledForReportingButNotEnforced"
