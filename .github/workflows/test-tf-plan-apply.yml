@@ -1,0 +1,273 @@
+name: "zReusable: Terraform Plan/Apply"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: string
+      working_dir:
+        required: false
+        type: string
+        default: "."
+      execute_change:
+        required: false
+        type: boolean
+        default: false
+      maintenance_mode:
+        required: false
+        type: boolean
+        default: false
+      tfvars_folder:
+        required: false
+        type: string
+        default: "./tfvars/"
+
+# Outputs moved to workflow level
+outputs:
+  apply_completed:
+    description: boolean value determining whether a Terraform Apply had been completed with changes applied
+    value: ${{ jobs.terraform-apply.outputs.apply_completed }}
+
+#Special permissions required for OIDC authentication
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+#These environment variables are used by the terraform azure provider to setup OIDC auth.
+env:
+  # ARM_USE_OIDC: true
+  ARM_USE_AZUREAD: true
+  ARM_ENVIRONMENT: ${{ vars.TF_BACKEND_CONFIG_ENVIRONMENT }}
+  
+  TF_VAR_ci_environment_name: ${{ inputs.environment }}
+  TF_VAR_maintenance_mode: "${{ inputs.maintenance_mode }}"
+
+  ## tfvars file path vars  
+  TFVARS_FOLDER: "${{ inputs.tfvars_folder || './tfvars/' }}"
+  TFVARS_TENANT_FILE: "${{ inputs.environment || vars.MANAGEMENT_TENANT_NAME_GOV }}.tfvars"  
+  TFVARS_COMMON_FILE: "common.tfvars"  
+
+  TF_VAR_management_tenant_tenant_id: ${{ vars.IS_AZURE_GOV == 'true' && vars.MANAGEMENT_TENANT_ID || vars.COMMERCIAL_MANAGEMENT_TENANT_ID}}
+  AWS_REGION: ${{ vars.TFSTATE_REGION }}
+  AWS_ROLE_ARN: ${{ vars.TFSTATE_ROLE_ARN }}
+
+jobs:
+  terraform-plan:
+    environment: ${{ inputs.environment }}
+    name: "Terraform Plan"
+    runs-on: ubuntu-latest
+    ## Prevents build from running if PR body does not start with '!!'
+    if: github.ref_name == 'main' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && ! startsWith(github.event.pull_request.body, '!!'))
+    env:
+      #this is needed since we are running terraform with read-only permissions
+      ARM_RESOURCE_PROVIDER_REGISTRATIONS : none
+
+    outputs:
+      tfplanExitCode: ${{ steps.tf-plan.outputs.exitcode }}
+
+    steps:
+      - name: Setup AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TFSTATE_ROLE_ARN }}
+          aws-region: ${{ vars.TFSTATE_REGION }}
+
+      - name: Authenticate and set Graph Access Token
+        shell: pwsh
+        run: |
+          if ("${{ vars.IS_AZURE_GOV }}" -eq "true") {
+            az cloud set --name AzureUSGovernment
+          }
+          az login --service-principal -u ${{ vars.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ vars.AZURE_TENANT_ID }}
+          $AccessToken = (az account get-access-token --resource-type ms-graph | ConvertFrom-Json).accessToken
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install the latest version of the Terraform CLI
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Add ssh key to ssh-agent
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+      # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+      - name: Terraform Init
+        working-directory: ${{ inputs.working_dir }}
+        run: |
+          terraform init --backend-config='bucket=${{ vars.TFSTATE_S3_BUCKET }}' \
+                          --backend-config='key=${{ vars.TFSTATE_KEY }}' \
+                          --backend-config='dynamodb_table=${{ vars.TFSTATE_DYNAMODB_TABLE }}' \
+                          --backend-config='encrypt=true'
+      # Checks that all Terraform configuration files adhere to a canonical format
+      # Will fail the build if not
+      - name: Terraform Format
+        working-directory: ${{ inputs.working_dir }}
+        run: terraform fmt -check --recursive
+
+      # Generates an execution plan for Terraform
+      # An exit code of 0 indicated no changes, 1 a terraform failure, 2 there are pending changes.
+      - name: Terraform Plan
+        working-directory: ${{ inputs.working_dir }}
+        id: tf-plan
+        ## Use TF_LOG to debug Terraform issues
+        # env:
+        #   TF_LOG : "DEBUG"
+        run: |
+          export exitcode=0
+          terraform plan -detailed-exitcode -no-color -out tfplan -var-file="$TFVARS_FOLDER$TFVARS_TENANT_FILE" -var-file="$TFVARS_FOLDER$TFVARS_COMMON_FILE" -lock-timeout=2m || export exitcode=$?
+          echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+          if [ $exitcode -eq 1 ]; then
+            echo Terraform Plan Failed!
+            exit 1
+          else
+            exit 0
+          fi
+      # Save plan to artifacts
+      - name: Publish Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ inputs.working_dir }}/tfplan
+
+      # Create string output of Terraform Plan
+      - name: Create String Output
+        id: tf-plan-string
+        working-directory: ${{ inputs.working_dir }}
+        run: |
+          TERRAFORM_PLAN=$(terraform show -no-color tfplan)
+          delimiter="$(openssl rand -hex 8)"
+          echo "summary<<${delimiter}" >> $GITHUB_OUTPUT
+          echo "## Terraform Plan Output" >> $GITHUB_OUTPUT
+          echo "<details><summary>Click to expand</summary>" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo '```terraform' >> $GITHUB_OUTPUT
+          echo "$TERRAFORM_PLAN" >> $GITHUB_OUTPUT
+          echo '```' >> $GITHUB_OUTPUT
+          echo "</details>" >> $GITHUB_OUTPUT
+          echo "${delimiter}" >> $GITHUB_OUTPUT
+      # Publish Terraform Plan as task summary
+      - name: Publish Terraform Plan to Task Summary
+        working-directory: ${{ inputs.working_dir }}
+        env:
+          SUMMARY: ${{ steps.tf-plan-string.outputs.summary }}
+        run: |
+          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+      # If this is a PR post the changes
+      - name: Push Terraform Output to PR
+        if: github.event.pull_request != null
+        uses: actions/github-script@v7
+        env:
+          SUMMARY: "${{ steps.tf-plan-string.outputs.summary }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = `${process.env.SUMMARY}`;
+            github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+            })
+  ## Conditions for Terraform Apply to run:
+  ## 1. Terraform plan produces exit code 2 (changes to apply)
+  ## AND
+  ## 2. The event is a workflow_dispatch, execute_change is true, and the actor is in the ALLOWED_MANUAL_DEPLOYERS list OR the event is a push to main
+  ## This is to allow manual deployments to be triggered from the GitHub UI, specifically for testing changes during Pull Requests, prior to merging.
+  ## The ALLOWED_MANUAL_DEPLOYERS list is a comma-separated list of GitHub usernames
+  ## e.g. ALLOWED_MANUAL_DEPLOYERS: "user1,user2,user3"
+  terraform-apply:
+    env:
+      ARM_RESOURCE_PROVIDER_REGISTRATIONS : none
+    environment: ${{ inputs.environment }}
+    name: "Terraform Apply"
+    if: |
+      (needs.terraform-plan.outputs.tfplanExitCode == 2) &&
+      (github.event_name == 'workflow_dispatch' && inputs.execute_change == true && (contains(vars.ALLOWED_MANUAL_DEPLOYERS, github.actor)) || github.ref_name == 'main')
+    runs-on: ubuntu-latest
+    needs: [terraform-plan]
+    outputs:
+      apply_completed: ${{ steps.terraform_apply.outputs.apply_completed }}
+
+    steps:
+      - name: Setup AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TFSTATE_ROLE_ARN }}
+          aws-region: ${{ vars.TFSTATE_REGION }}
+
+      - name: Authenticate and set Graph Access Token
+        shell: pwsh
+        run: |
+          if ("${{ vars.IS_AZURE_GOV }}" -eq "true") {
+            az cloud set --name AzureUSGovernment
+          }
+          az login --service-principal -u ${{ vars.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ vars.AZURE_TENANT_ID }}
+          $AccessToken = (az account get-access-token --resource-type ms-graph | ConvertFrom-Json).accessToken
+          
+        # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Add ssh key to ssh-agent
+        # Supports fetching the packages. Not just the package.json git refs of legacy, but onerail scripts pulling packages.
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
+
+      # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+      - name: Terraform Init
+        working-directory: ${{ inputs.working_dir }}
+        run: |
+          terraform init  --backend-config='bucket=${{ vars.TFSTATE_S3_BUCKET }}' \
+                          --backend-config='key=${{ vars.TFSTATE_KEY }}' \
+                          --backend-config='dynamodb_table=${{ vars.TFSTATE_DYNAMODB_TABLE }}' \
+                          --backend-config='encrypt=true'
+      # Download saved plan from artifacts
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ inputs.working_dir}}
+
+      - name: Enable Maintenance Mode
+        if: ${{ inputs.maintenance_mode == true }}
+        shell: pwsh
+        run: |
+          Write-Output "Enabling Maintenance Mode"
+          terraform apply `
+            -auto-approve `
+            --target module.azure-policies-log.azurerm_subscription_policy_assignment.policy_asgn `
+            --target module.azure-policies-sec.azurerm_subscription_policy_assignment.policy_asgn
+      # Terraform Apply
+      - name: Terraform Apply
+        id: terraform_apply
+        working-directory: ${{ inputs.working_dir }}
+        ## Use TF_LOG to debug Terraform issues
+        # env:
+        #   TF_LOG : "DEBUG"
+        run: |
+          terraform apply -auto-approve -var-file="$TFVARS_FOLDER$TFVARS_TENANT_FILE" -var-file="$TFVARS_FOLDER$TFVARS_COMMON_FILE" tfplan
+          echo "apply_completed=true" >> $GITHUB_OUTPUT
+          
+      - name: Disable Maintenance Mode
+        if: ${{ inputs.maintenance_mode == true }}
+        shell: pwsh
+        env:
+          TF_VAR_maintenance_mode: 'false'
+        run: |
+          Write-Output "Disabling Maintenance Mode"
+          terraform apply `
+            -auto-approve `
+            --target module.azure-policies-log.azurerm_subscription_policy_assignment.policy_asgn `
+            --target module.azure-policies-sec.azurerm_subscription_policy_assignment.policy_asgn

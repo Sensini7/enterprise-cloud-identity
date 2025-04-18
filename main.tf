@@ -2,7 +2,7 @@
 ## The workflow "Entra: Initialize Baseline" must first be run. See `ps-disable-security-defaults.yml`
 ## If Security Defaults are enabled, Terraform will fail to create the Conditional Access Policies.
 module "conditional_access_policy" {
-  source = "git@github.com:EasyDynamics/EntraID-800-53-Terraform-Modules.git//modules/conditional_access_policies?ref=0.0.127"
+  source = "git@github.com:Sensini7/EntraID-800-53-Terraform-Modules.git//modules/conditional_access_policies?ref=main"
 
   is_azure_gov = var.is_azure_gov
 
@@ -39,7 +39,7 @@ module "log-analytics-breakglass-alerts" {
   providers = {
     azurerm = azurerm.logging
   }
-  source = "git@github.com:EasyDynamics/EntraID-800-53-Terraform-Modules.git//modules/log-analytics-alerts?ref=0.0.78"
+  source = "git@github.com:Sensini7/EntraID-800-53-Terraform-Modules.git//modules/log-analytics-alerts?ref=main"
 
   alert_users             = var.breakglass_alerts_action_group
   alerts_folder_path      = "${path.module}/alerts"
@@ -78,7 +78,7 @@ module "azure-policies-log" {
   providers = {
     azurerm = azurerm.logging
   }
-  source                      = "git@github.com:EasyDynamics/EntraID-800-53-Terraform-Modules.git//modules/azure_policies?ref=0.0.126"
+  source                      = "git@github.com:Sensini7/EntraID-800-53-Terraform-Modules.git//modules/azure_policies?ref=main"
   depends_on                  = [module.log-analytics-breakglass-alerts]
   azure_subscription_id       = var.management_logging_subscription_id
   maintenance_mode_not_scopes = local.maintenance_mode_not_scopes
@@ -100,7 +100,7 @@ module "azure-policies-sec" {
   }
   ## Only create this if the subscription ID's differ
   count                 = var.management_logging_subscription_id == var.management_security_subscription_id ? 0 : 1
-  source                = "git@github.com:EasyDynamics/EntraID-800-53-Terraform-Modules.git//modules/azure_policies?ref=0.0.90"
+  source                = "git@github.com:Sensini7/EntraID-800-53-Terraform-Modules.git//modules/azure_policies?ref=main"
   depends_on            = [module.log-analytics-breakglass-alerts]
   azure_subscription_id = var.management_security_subscription_id
 

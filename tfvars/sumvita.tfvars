@@ -1,14 +1,14 @@
-management_tenant_client_id         = "7653f01a-1979-4792-80d1-bbdab0a97962"
-management_tenant_tenant_id         = "dc090f66-0d65-4fe7-bc58-b5bc5776f63d"
-default_group_owners_ids            = ["5811c414-5409-4159-a343-be217097c934"]
-breakglass_alerts_action_group      = [{ name = "Majed Ayoub", email = "mayoub@easydynamics.com" }, { name = "Kelvin Dieser", email = "kdieser@easydynamics.com" }]
-icam_alerts_action_group            = [{ name = "Majed Ayoub", email = "mayoub@easydynamics.com" }, { name = "Kelvin Dieser", email = "kdieser@easydynamics.com" }]
-management_logging_subscription_id  = "65a0cbac-3e89-42d0-a56f-b5b31ce204ec"
-management_security_subscription_id = "65a0cbac-3e89-42d0-a56f-b5b31ce204ec"
+management_tenant_client_id         = "4f48fad6-3647-4258-b300-f8b158567fc2"
+management_tenant_tenant_id         = "e1d41e97-df11-48ba-8a96-e7d2ad4d17f9"
+default_group_owners_ids            = ["7f857d43-e64b-46fa-8e8d-c6ecad996bcf"]
+breakglass_alerts_action_group      = [{ name = "sensini", email = "sezai@rnkondagmail.onmicrosoft.com" }]
+icam_alerts_action_group            = [{ name = "sensini", email = "sezai@rnkondagmail.onmicrosoft.com" }]
+management_logging_subscription_id  = "bae21dea-f66e-48ad-8647-5dd3e33c2a9c"
+management_security_subscription_id = "bae21dea-f66e-48ad-8647-5dd3e33c2a9c"
 terms_of_use_id                     = "66202bf3-995d-4727-9e06-8a87866e18b9"
 is_azure_gov                        = false
 primary_region                      = "eastus"
 customer_name                       = "EZD"
-allowed_ip_cidr_list                = ["68.252.244.132", "108.48.5.37"]
-deployment_enterprise_app_object_id = "16b48dd7-a8ac-4c1f-a45c-22a4638dd84e"
+#allowed_ip_cidr_list                = ["68.252.244.132", "108.48.5.37"]
+#deployment_enterprise_app_object_id = "16b48dd7-a8ac-4c1f-a45c-22a4638dd84e"
 environment_name                    = "mgmt"
