@@ -1,7 +1,7 @@
 name: Tearrform CAP Deployment
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       environment:
         required: true
@@ -22,11 +22,7 @@ on:
         required: false
         type: string
         default: "./tfvars/"
-    outputs:
-      apply_completed:
-        description: boolean value determining whether a Terraform Apply had been completed with changes applied
-        value: ${{ jobs.terraform-apply.outputs.apply_completed }}
-
+        
 #Special permissions required for OIDC authentication
 permissions:
     id-token: write

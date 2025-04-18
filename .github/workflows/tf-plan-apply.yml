@@ -1,7 +1,7 @@
 name: "zReusable: Terraform Plan/Apply"
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       environment:
         required: true
@@ -190,6 +190,11 @@ jobs:
       apply_completed: ${{ steps.terraform_apply.outputs.apply_completed }}
 
     steps:
+      - name: Setup AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TFSTATE_ROLE_ARN }}
+          aws-region: ${{ vars.TFSTATE_REGION }}
 
       - name: Authenticate and set Graph Access Token
         shell: pwsh
