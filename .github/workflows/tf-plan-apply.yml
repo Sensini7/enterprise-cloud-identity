@@ -23,12 +23,6 @@ on:
         type: string
         default: "./tfvars/"
 
-# Outputs moved to workflow level
-outputs:
-  apply_completed:
-    description: boolean value determining whether a Terraform Apply had been completed with changes applied
-    value: ${{ jobs.terraform-apply.outputs.apply_completed }}
-
 #Special permissions required for OIDC authentication
 permissions:
   id-token: write
@@ -196,11 +190,6 @@ jobs:
       apply_completed: ${{ steps.terraform_apply.outputs.apply_completed }}
 
     steps:
-      - name: Setup AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.TFSTATE_ROLE_ARN }}
-          aws-region: ${{ vars.TFSTATE_REGION }}
 
       - name: Authenticate and set Graph Access Token
         shell: pwsh
