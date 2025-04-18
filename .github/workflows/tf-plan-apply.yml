@@ -22,10 +22,12 @@ on:
         required: false
         type: string
         default: "./tfvars/"
-    outputs:
-      apply_completed:
-        description: boolean value determining whether a Terraform Apply had been completed with changes applied
-        value: ${{ jobs.terraform-apply.outputs.apply_completed }}
+
+# Outputs moved to workflow level
+outputs:
+  apply_completed:
+    description: boolean value determining whether a Terraform Apply had been completed with changes applied
+    value: ${{ jobs.terraform-apply.outputs.apply_completed }}
 
 #Special permissions required for OIDC authentication
 permissions:
@@ -80,7 +82,6 @@ jobs:
           }
           az login --service-principal -u ${{ vars.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ vars.AZURE_TENANT_ID }}
           $AccessToken = (az account get-access-token --resource-type ms-graph | ConvertFrom-Json).accessToken
-
       # Checkout the repository to the GitHub Actions runner
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,7 +105,6 @@ jobs:
                           --backend-config='key=${{ vars.TFSTATE_KEY }}' \
                           --backend-config='dynamodb_table=${{ vars.TFSTATE_DYNAMODB_TABLE }}' \
                           --backend-config='encrypt=true'
-
       # Checks that all Terraform configuration files adhere to a canonical format
       # Will fail the build if not
       - name: Terraform Format
@@ -121,18 +121,14 @@ jobs:
         #   TF_LOG : "DEBUG"
         run: |
           export exitcode=0
-
           terraform plan -detailed-exitcode -no-color -out tfplan -var-file="$TFVARS_FOLDER$TFVARS_TENANT_FILE" -var-file="$TFVARS_FOLDER$TFVARS_COMMON_FILE" -lock-timeout=2m || export exitcode=$?
-
           echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
-
           if [ $exitcode -eq 1 ]; then
             echo Terraform Plan Failed!
             exit 1
           else
             exit 0
           fi
-
       # Save plan to artifacts
       - name: Publish Terraform Plan
         uses: actions/upload-artifact@v4
@@ -146,7 +142,6 @@ jobs:
         working-directory: ${{ inputs.working_dir }}
         run: |
           TERRAFORM_PLAN=$(terraform show -no-color tfplan)
-
           delimiter="$(openssl rand -hex 8)"
           echo "summary<<${delimiter}" >> $GITHUB_OUTPUT
           echo "## Terraform Plan Output" >> $GITHUB_OUTPUT
@@ -157,7 +152,6 @@ jobs:
           echo '```' >> $GITHUB_OUTPUT
           echo "</details>" >> $GITHUB_OUTPUT
           echo "${delimiter}" >> $GITHUB_OUTPUT
-
       # Publish Terraform Plan as task summary
       - name: Publish Terraform Plan to Task Summary
         working-directory: ${{ inputs.working_dir }}
@@ -165,7 +159,6 @@ jobs:
           SUMMARY: ${{ steps.tf-plan-string.outputs.summary }}
         run: |
           echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
-
       # If this is a PR post the changes
       - name: Push Terraform Output to PR
         if: github.event.pull_request != null
@@ -182,7 +175,6 @@ jobs:
                 repo: context.repo.repo,
                 body: body
             })
-
   ## Conditions for Terraform Apply to run:
   ## 1. Terraform plan produces exit code 2 (changes to apply)
   ## AND
@@ -241,7 +233,6 @@ jobs:
                           --backend-config='key=${{ vars.TFSTATE_KEY }}' \
                           --backend-config='dynamodb_table=${{ vars.TFSTATE_DYNAMODB_TABLE }}' \
                           --backend-config='encrypt=true'
-
       # Download saved plan from artifacts
       - name: Download Terraform Plan
         uses: actions/download-artifact@v4
@@ -258,7 +249,6 @@ jobs:
             -auto-approve `
             --target module.azure-policies-log.azurerm_subscription_policy_assignment.policy_asgn `
             --target module.azure-policies-sec.azurerm_subscription_policy_assignment.policy_asgn
-
       # Terraform Apply
       - name: Terraform Apply
         id: terraform_apply
@@ -269,7 +259,6 @@ jobs:
         run: |
           terraform apply -auto-approve -var-file="$TFVARS_FOLDER$TFVARS_TENANT_FILE" -var-file="$TFVARS_FOLDER$TFVARS_COMMON_FILE" tfplan
           echo "apply_completed=true" >> $GITHUB_OUTPUT
-
           
       - name: Disable Maintenance Mode
         if: ${{ inputs.maintenance_mode == true }}
@@ -278,7 +267,6 @@ jobs:
           TF_VAR_maintenance_mode: 'false'
         run: |
           Write-Output "Disabling Maintenance Mode"
-
           terraform apply `
             -auto-approve `
             --target module.azure-policies-log.azurerm_subscription_policy_assignment.policy_asgn `
