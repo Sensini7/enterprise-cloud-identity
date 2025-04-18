@@ -22,7 +22,7 @@ on:
         required: false
         type: string
         default: "./tfvars/"
-        
+
 #Special permissions required for OIDC authentication
 permissions:
     id-token: write
@@ -90,9 +90,9 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.MODULES_REPO_SSH_PRIVATE_KEY }}
 
-      - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
-        run: terraform apply -auto-approve tfplan
+      # - name: Terraform Apply
+      #   if: github.ref == 'refs/heads/main'
+      #   run: terraform apply -auto-approve tfplan
 
       - name: Cleanup SSH Keys
         if: always()
